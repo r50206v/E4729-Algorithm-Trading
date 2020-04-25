@@ -1,0 +1,8 @@
+pandas
+numpy 
+fbprophet
+plotly
+mplfinance
+matplotlib
+tqdm
+scikit-learn
