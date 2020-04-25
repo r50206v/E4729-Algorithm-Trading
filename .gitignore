@@ -3,3 +3,4 @@ Lecture 4/.ipynb_checkpoints
 *.gz
 Lecture 4/__pycache__
 *.db
+project/raw_data
