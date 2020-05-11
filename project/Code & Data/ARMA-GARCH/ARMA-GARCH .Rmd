@@ -1,0 +1,199 @@
+---
+title: "ARMA-GARCH For Bitcoin"
+author: "Jiheng Mao"
+date: "2020/5/7"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyr)
+library(ggplot2)
+library(dplyr)
+library(forecast)
+library(rugarch)
+```
+
+## data preprocessing
+# Reading data
+```{r read data}
+path = getwd()
+data = read.csv(paste(path,'2020.5.5BTCUSD-H1-NoSession.csv',sep = '/'),header = TRUE,sep = '\t')
+head(data)
+```
+
+# Dealing with datetime format
+```{r format}
+tmp = paste(data$Date,data$Time)
+tmp = as.POSIXct(tmp,format = '%Y%m%d %H:%M:%OS')
+data['Datetime'] = tmp
+bit = data.frame(Datetime = data$Datetime,Close = data$Close)
+head(bit)
+```
+
+# Obtianing the log return
+```{r Return}
+l = length(bit$Close)
+cur = log(bit$Close[2:l]/bit$Close[1:l-1])
+cur = append(cur,NaN)
+bit['Return'] = cur
+bit$Close = NULL
+bit = drop_na(bit)
+
+# the full sample is starting from 2019-01-01 00:00:00 to 2020-01-01 00:00:00
+# the test set is starting from 2019-09-10 22:00:00 to 2020-01-01 00:00:00
+# Hence we obtain the full set and the test set as follow
+bit = bit[bit$Datetime >= '2019-01-01 00:00:00' & bit$Datetime <= '2020-01-01 00:00:00',]
+rownames(bit) <- seq(length=nrow(bit))
+train = bit[bit$Datetime >= '2019-01-01 00:00:00' & bit$Datetime <= '2019-09-10 22:00:00',]
+# tp = bit[bit$Datetime >= '2019-05-20 22:00:00' & bit$Datetime <= '2019-09-10 00:00:00',]
+tp = bit[bit$Datetime >= '2019-09-10 22:00:00' & bit$Datetime <= '2020-01-01 00:00:00',]
+ntest = length(tp$Return)
+head(bit)
+```
+
+## Basic graphing to get a hold of the series
+```{r Graph}
+acf(bit$Return,lag.max = 100)
+p <- ggplot(bit, aes(x=Datetime, y=Return, group = 1)) +
+  geom_line() +
+  xlab("")
+pacf(bit$Return)
+p
+```
+
+## Fitting with Arima
+By plotting the square of residual and doing the Ljung-Box test, we can see the serial dependency in it. Hence we consider to use ARMA-GARCH to forecast the series.
+```{r Arima}
+model = auto.arima(bit$Return)
+order = model$arma[1:2]
+autoplot(model$residual)
+acf(model$residual,lag.max = 10)
+autoplot((model$residual)^2)
+acf((model$residual)^2,lag.max = 10)
+Box.test((model$residual)^2,10,type = 'Ljung')
+```
+
+## Fitting and Forecasting with ARMA-GARCH
+By setting the out.sample as the ntest, we leave out the last ntest observation as the test set. Furthermore, we use the rolling forecasting method which will use all the information before the forecasted day which is more similar to the reality scenarios.
+```{r ARMA-GARCH}
+model = auto.arima(train$Return)
+order = model$arma[1:2]
+spec = ugarchspec(variance.model = list(model = "sGARCH", garchOrder = c(1,1)),
+           mean.model = list(armaOrder = order, include.mean=TRUE), distribution.model = "std") 
+fit = ugarchfit(spec,train$Return, solver = 'hybrid',out.sample = ntest, numderiv.control = 
+                  list(hess.zero.tol=1e-7)) 
+forecasts = ugarchforecast(fit,n.ahead = 1, n.roll = ntest)
+
+fitted(forecasts) -> output_garch
+
+#calculate the MAE
+fpm(forecasts) -> result
+cat('The MSE of the forcast is:',result$MSE,'\n')
+cat('The MAE of the forcast is:',result$MAE)
+```
+
+```{r ARMA-GARCH fixed window}
+# x = vector()
+# for (i in 1:ntest){
+#   rollingset = bit$Return[1+i:length(train$Return)-1+i]
+#   model = auto.arima(rollingset)
+#   order = model$arma[1:2]
+#   spec = ugarchspec(variance.model = list(model = "sGARCH", garchOrder = c(1,1)),
+#            mean.model = list(armaOrder = order, include.mean = TRUE), distribution.model = "jsu")
+#   fit = ugarchfit(spec,rollingset, solver = 'solnp',fit.control=list(scale=1), solver.control=list(trace=1))
+#   forecasts = ugarchforecast(fit,n.ahead = 1)
+#   fitted(forecasts) -> output_garch
+#   x[i] = output_garch[[1,1]]
+# }
+
+# spec = ugarchspec(variance.model = list(model = "sGARCH", garchOrder = c(1,1)),
+#            mean.model = list(armaOrder = order, include.mean=TRUE), distribution.model = "std") 
+# fit = ugarchfit(spec,train$Return, solver = 'hybrid', numderiv.control = 
+#                   list(hess.zero.tol=1e-7)) 
+# forecasts = ugarchforecast(fit,n.ahead = 1)
+# 
+# fitted(forecasts) -> output_garch
+
+#calculate the MAE
+# fpm(forecasts) -> result
+# cat('The MSE of the forcast is:',result$MSE,'\n')
+# cat('The MAE of the forcast is:',result$MAE)
+```
+## Plotting the forecast result and the test set
+```{r Forecast and test set}
+plot(forecasts)
+```
+
+## Forming Strategy: Long and Short
+```{r Strategy}
+x = vector()
+for (i in 1:ntest+1) {
+  x = append(x,output_garch[[1,i]])
+}
+# x = output_garch[,1]
+Netret = vector()
+for (i in 1:ntest) {
+  if (x[i] >= 0){
+  Netret[i] = exp(tp$Return[i])
+  } else {
+  Netret[i] = 2-exp(tp$Return[i])
+  }
+}
+cumret = vector()
+cumret[1] = 1
+for (i in 1:ntest) {
+  cumret[i+1] = cumret[i]*Netret[i]
+}
+buyandhold = vector()
+buyandhold[1] = 1
+for (i in 1:length(Netret)) {
+  buyandhold[i+1] = buyandhold[i]*exp(tp$Return[i])
+}
+cumret = cumret[2:length(cumret)]
+buyandhold = buyandhold[2:length(buyandhold)]
+newdf2 = data.frame(Datetime = tp$Datetime, CummulativeReturn = cumret, Buyandhold = buyandhold)
+df <- newdf2 %>%
+  select(Datetime, CummulativeReturn, Buyandhold) %>%
+  gather(key = "variable", value = "value", -Datetime)
+ggplot(df, aes(x = Datetime, y = value)) + 
+  geom_line(aes(color = variable, linetype = variable)) + 
+  scale_color_manual(values = c("darkred", "steelblue"))
+tail(cumret,1)
+```
+
+## Forming Strategy: Long only
+```{r Strategy}
+Netret = vector()
+for (i in 1:length(tp$Return)) {
+  if (x[i] >= 0){
+  Netret[i] = exp(tp$Return[i])
+  } else {
+  Netret[i] = 0
+  }
+}
+cumret = vector()
+cumret[1] = 1
+for (i in 1:length(Netret)) {
+  if (Netret[i] > 0){
+    cumret[i+1] = cumret[i]*Netret[i]
+  } else {
+    cumret[i+1] = cumret[i]
+  }
+}
+buyandhold = vector()
+buyandhold[1] = 1
+for (i in 1:length(Netret)) {
+  buyandhold[i+1] = buyandhold[i]*exp(tp$Return[i])
+}
+cumret = cumret[2:length(cumret)]
+buyandhold = buyandhold[2:length(buyandhold)]
+newdf2 = data.frame(Datetime = tp$Datetime, CummulativeReturn = cumret, Buyandhold = buyandhold)
+df <- newdf2 %>%
+  select(Datetime, CummulativeReturn, Buyandhold) %>%
+  gather(key = "variable", value = "value", -Datetime)
+ggplot(df, aes(x = Datetime, y = value)) + 
+  geom_line(aes(color = variable, linetype = variable)) + 
+  scale_color_manual(values = c("darkred", "steelblue"))
+tail(cumret,1)
+```
